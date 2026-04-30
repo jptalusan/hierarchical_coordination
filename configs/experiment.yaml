@@ -1,0 +1,38 @@
+# Default single-experiment config.
+#
+# Override on the command line:
+#   uv run python -m hcoord dispatcher=hierarchical n_regions=3
+#
+# Sweep with --multirun:
+#   uv run python -m hcoord --multirun \
+#     dispatcher=monolithic,hierarchical fleet_size=20,40,80 intensity=1,2,4
+
+seed: 11
+
+# Fleet
+fleet_size: 30
+capacity: 6
+service_end_time: 1440.0   # minutes; one full day
+placement: hubs            # "hubs" | "demand_proportional"
+
+# Demand
+intensity: 1.0
+base_rate: 0.4
+structural_zero_prob: 0.4
+announce_lead_min: 90.0
+arrival_buffer_min: 15.0
+
+# Dispatcher
+dispatcher: monolithic     # "monolithic" | "hierarchical"
+n_regions: 5               # only used when dispatcher=hierarchical (1..5)
+rebalance_interval_min: 30.0
+forecast_lookahead_min: 60.0
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d_%H-%M-%S}_${dispatcher}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${dispatcher}_F${fleet_size}_I${intensity}_K${n_regions}_${placement}
+  job:
+    chdir: false
