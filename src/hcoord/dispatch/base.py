@@ -32,7 +32,7 @@ class DispatchResult:
 class Dispatcher(ABC):
     """Base class. Concrete dispatchers implement `assign`; `rebalance` is a no-op by default.
 
-    If `scorer` is provided, `_pick_best_insertion` uses one of two modes:
+    If `scorer` is provided, `_pick_best_insertion` uses one of three modes:
 
     - `mode="rank"`: rank candidates by predicted cost, exhaustive (p, q) on
       the top `scorer_top_k`, fall back to exhaustive on the rest only if
@@ -45,9 +45,16 @@ class Dispatcher(ABC):
       — typical for the v1 MLP. Quality is bounded by the false-negative
       rate of the feasibility classifier; the threshold lets the caller
       tune the speed/quality tradeoff explicitly.
+    - `mode="stacked"`: filter then rank. First drop confident-infeasibles
+      (filter step), then take the top-K-by-predicted-cost from the
+      survivors. The hypothesis: cost-ranking errors are smaller within
+      a homogeneous (predicted-feasible) candidate pool than across the
+      whole fleet. Quality should match filter mode; speedup should
+      approach rank mode. Falls back like filter when survivors yield no
+      feasible insertion.
 
-    Either way, exhaustive (p, q) feasibility checks run on every retained
-    vehicle, so the dispatcher never returns an actually-infeasible result.
+    Every mode finishes with exhaustive (p, q) feasibility on retained
+    vehicles, so the dispatcher never returns an actually-infeasible result.
     """
 
     def __init__(
@@ -63,9 +70,9 @@ class Dispatcher(ABC):
     ) -> None:
         if scorer_top_k < 1:
             raise ValueError(f"scorer_top_k must be >= 1, got {scorer_top_k}")
-        if scorer_mode not in ("rank", "filter"):
+        if scorer_mode not in ("rank", "filter", "stacked"):
             raise ValueError(
-                f"scorer_mode must be 'rank' or 'filter', got {scorer_mode!r}"
+                f"scorer_mode must be 'rank', 'filter', or 'stacked', got {scorer_mode!r}"
             )
         self.fleet = fleet
         self.oracle = oracle
@@ -95,6 +102,8 @@ class Dispatcher(ABC):
             return self._exhaustive_pick(candidates, request)
         if self.scorer_mode == "filter":
             return self._filter_pick(candidates, request)
+        if self.scorer_mode == "stacked":
+            return self._stacked_pick(candidates, request)
         return self._rank_pick(candidates, request)
 
     def _rank_pick(
@@ -132,17 +141,63 @@ class Dispatcher(ABC):
         if not candidates:
             return None
 
-        logits = self.scorer.feasibility_logits(candidates, request, self.oracle)
-        keep = logits >= self.scorer_filter_logit_threshold
-        survivors = [c for c, k in zip(candidates, keep) if k]
+        survivors, dropped = self._filter_survivors(candidates, request)
         if not survivors:
             return self._exhaustive_pick(candidates, request)
         best = self._exhaustive_pick(survivors, request)
         if best is not None:
             return best
-        # All survivors were actually infeasible — try the dropped ones.
-        rest = [c for c, k in zip(candidates, keep) if not k]
-        return self._exhaustive_pick(rest, request)
+        return self._exhaustive_pick(dropped, request)
+
+    def _stacked_pick(
+        self,
+        candidates: list[Vehicle],
+        request: Request,
+    ) -> InsertionResult | None:
+        """Filter then rank: filter survivors, then take top-K-by-predicted-cost
+        from those, exhaustive (p, q) on top-K, fall back through dropped
+        survivors and finally to filter-rejected vehicles."""
+        if not candidates:
+            return None
+
+        survivors, dropped = self._filter_survivors(candidates, request)
+        if not survivors:
+            return self._exhaustive_pick(candidates, request)
+
+        if len(survivors) <= self.scorer_top_k:
+            best = self._exhaustive_pick(survivors, request)
+            if best is not None:
+                return best
+            return self._exhaustive_pick(dropped, request)
+
+        import numpy as np
+
+        scores = self.scorer.score_batch(survivors, request, self.oracle)
+        order = np.argsort(scores)
+        top = [survivors[i] for i in order[: self.scorer_top_k]]
+        rest_survivors = [survivors[i] for i in order[self.scorer_top_k :]]
+
+        best = self._exhaustive_pick(top, request)
+        if best is not None:
+            return best
+        # Top-K had nothing feasible: try the rest of the survivors.
+        best = self._exhaustive_pick(rest_survivors, request)
+        if best is not None:
+            return best
+        # Even survivors yielded nothing: try the filter-rejected ones.
+        return self._exhaustive_pick(dropped, request)
+
+    def _filter_survivors(
+        self,
+        candidates: list[Vehicle],
+        request: Request,
+    ) -> tuple[list[Vehicle], list[Vehicle]]:
+        """Apply the feasibility-logit threshold; return (survivors, dropped)."""
+        logits = self.scorer.feasibility_logits(candidates, request, self.oracle)
+        keep = logits >= self.scorer_filter_logit_threshold
+        survivors = [c for c, k in zip(candidates, keep) if k]
+        dropped = [c for c, k in zip(candidates, keep) if not k]
+        return survivors, dropped
 
     def _exhaustive_pick(
         self,

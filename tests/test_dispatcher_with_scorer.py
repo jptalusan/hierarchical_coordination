@@ -363,3 +363,105 @@ def test_invalid_scorer_mode_rejected():
         MonolithicDispatcher(fleet=fleet, oracle=oracle,
                              scorer=_PerfectFilter(),
                              scorer_mode="bogus")
+
+
+# ---- stacked-mode tests ----
+
+
+class _PerfectFilterAndRanker:
+    """Perfect feasibility logits + cost-equal-to-truth scores. Drop-in scorer."""
+
+    def feasibility_logits(self, vehicles, request, oracle):
+        from hcoord.dispatch.insertion import best_insertion
+
+        out = np.empty(len(vehicles), dtype=np.float32)
+        for i, v in enumerate(vehicles):
+            r = best_insertion(v, request, oracle)
+            out[i] = 5.0 if r is not None else -5.0
+        return out
+
+    def score_batch(self, vehicles, request, oracle):
+        from hcoord.dispatch.insertion import best_insertion
+
+        out = np.empty(len(vehicles), dtype=np.float32)
+        for i, v in enumerate(vehicles):
+            r = best_insertion(v, request, oracle)
+            out[i] = float(r.cost) if r is not None else 1e9
+        return out
+
+    def score_pair(self, vehicle, request, oracle):
+        return float(self.score_batch([vehicle], request, oracle)[0])
+
+
+def test_stacked_mode_with_perfect_scorer_matches_baseline():
+    """Stacked = filter then top-K. With a perfect filter + ranker, the chosen
+    vehicle is the heuristic argmin among feasibles."""
+    baseline = _run_dispatcher(scorer=None)
+    _, oracle, fleet, requests = _toy_setup()
+    d = MonolithicDispatcher(
+        fleet=fleet, oracle=oracle,
+        scorer=_PerfectFilterAndRanker(),
+        scorer_mode="stacked",
+        scorer_top_k=2,
+        scorer_filter_logit_threshold=0.0,
+    )
+    learned = []
+    for req in requests[:12]:
+        r = d.assign(req, now=req.announce_time)
+        learned.append((r.vehicle_id, r.cost))
+    assert learned == baseline
+
+
+def test_stacked_mode_falls_back_when_topk_all_infeasible():
+    """If every survivor's top-K turns out actually infeasible, stacked
+    must walk down the rest_survivors list before giving up to dropped."""
+    from hcoord.fleet import Vehicle
+
+    _, oracle, fleet, requests = _toy_setup(fleet_size=6)
+    # Make first 2 vehicles infeasible (way past end-of-shift).
+    for i in range(2):
+        v = fleet[i]
+        fleet[i] = Vehicle(
+            id=v.id, capacity=v.capacity, home=v.home, location=v.location,
+            available_time=v.service_end_time + 1.0,
+            service_end_time=v.service_end_time,
+        )
+
+    class _PassFilterButRankInfeasibleFirst:
+        """Keeps everyone past the filter, but ranks the two rigged-infeasible
+        vehicles as cheapest. Top-K=2 gets both infeasibles."""
+        def feasibility_logits(self, vehicles, request, oracle):
+            return np.full(len(vehicles), 5.0, dtype=np.float32)
+
+        def score_batch(self, vehicles, request, oracle):
+            return np.array(
+                [-1e3 if v.id < 2 else float(v.id) for v in vehicles],
+                dtype=np.float32,
+            )
+
+    # Baseline: just exhaustive.
+    d_base = MonolithicDispatcher(fleet=[v for v in fleet], oracle=oracle)
+    base = []
+    for req in requests[:5]:
+        base.append(d_base.assign(req, now=req.announce_time).vehicle_id)
+
+    # Reset for stacked run.
+    _, oracle2, fleet2, requests2 = _toy_setup(fleet_size=6)
+    for i in range(2):
+        v = fleet2[i]
+        fleet2[i] = Vehicle(
+            id=v.id, capacity=v.capacity, home=v.home, location=v.location,
+            available_time=v.service_end_time + 1.0,
+            service_end_time=v.service_end_time,
+        )
+    d_learn = MonolithicDispatcher(
+        fleet=fleet2, oracle=oracle2,
+        scorer=_PassFilterButRankInfeasibleFirst(),
+        scorer_mode="stacked",
+        scorer_top_k=2,
+        scorer_filter_logit_threshold=0.0,
+    )
+    learn = []
+    for req in requests2[:5]:
+        learn.append(d_learn.assign(req, now=req.announce_time).vehicle_id)
+    assert learn == base
