@@ -1,5 +1,10 @@
 # Write-up prep — hierarchical decomposition for multi-modal DVRP
 
+> **NSF whitepaper:** `whitepaper/thrust2_hierarchical_coordination.tex`
+> condenses the preliminary-evidence story into 1-2 pages aligned to
+> Thrust 2 RQ 4/5, Barriers 1-3, and the M2/M4 milestones. Numbers below
+> sourced; numbers in the .tex match Table 1 (`learned_llp/aggregated_stacked.csv`).
+
 Reference doc for the eventual proposal write-up. Captures substrate,
 sweep configurations, and headline numbers so we can pull from this
 once the proposal section scaffold is clear. Figures and raw CSVs live
