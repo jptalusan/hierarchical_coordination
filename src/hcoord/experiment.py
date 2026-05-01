@@ -61,6 +61,12 @@ class ExperimentConfig:
     # at the end of the run.
     collect_to: str | None = None
 
+    # Learned scorer (optional). When set, the dispatcher uses the model to
+    # rank candidate vehicles, runs exhaustive (p, q) on the top-K, falls
+    # back to exhaustive on the rest if none of the top-K is feasible.
+    scorer_path: str | None = None
+    scorer_top_k: int = 3
+
 
 def _build_dispatcher(
     cfg: ExperimentConfig,
@@ -70,9 +76,13 @@ def _build_dispatcher(
     fleet: list[Any],
     requests: list[Any],
     observer: Any = None,
+    scorer: Any = None,
 ) -> Dispatcher:
     if cfg.dispatcher == "monolithic":
-        return MonolithicDispatcher(fleet=fleet, oracle=oracle, observer=observer)
+        return MonolithicDispatcher(
+            fleet=fleet, oracle=oracle, observer=observer,
+            scorer=scorer, scorer_top_k=cfg.scorer_top_k,
+        )
     if cfg.dispatcher == "hierarchical":
         n_hubs = len(network.hubs)
         if not 1 <= cfg.n_regions <= n_hubs:
@@ -93,6 +103,8 @@ def _build_dispatcher(
             rebalance_interval_min=cfg.rebalance_interval_min,
             forecast_lookahead_min=cfg.forecast_lookahead_min,
             observer=observer,
+            scorer=scorer,
+            scorer_top_k=cfg.scorer_top_k,
         )
     raise ValueError(f"unknown dispatcher: {cfg.dispatcher!r}")
 
@@ -163,9 +175,15 @@ def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
         }
         collector = InsertionCollector(oracle, context=ctx)
 
+    scorer = None
+    if cfg.scorer_path is not None:
+        from hcoord.learning.inference import LearnedScorer  # lazy: learn extra
+
+        scorer = LearnedScorer.from_checkpoint(cfg.scorer_path)
+
     dispatcher = _build_dispatcher(
         cfg, network=network, oracle=oracle, fleet=fleet, requests=requests,
-        observer=collector,
+        observer=collector, scorer=scorer,
     )
 
     decisions: list[DecisionRecord] = []
