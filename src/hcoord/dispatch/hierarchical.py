@@ -15,12 +15,17 @@ A real forecaster can be plugged in by replacing `_compute_targets`.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from hcoord.demand import Request
 from hcoord.dispatch.base import DispatchResult, Dispatcher
-from hcoord.dispatch.insertion import apply_insertion, best_insertion
+from hcoord.dispatch.insertion import InsertionObserver, apply_insertion
 from hcoord.fleet import Vehicle
 from hcoord.regions import Partition
 from hcoord.travel import TravelTimeOracle
+
+if TYPE_CHECKING:
+    from hcoord.learning.inference import LearnedScorer
 
 
 class HierarchicalDispatcher(Dispatcher):
@@ -33,8 +38,17 @@ class HierarchicalDispatcher(Dispatcher):
         future_requests: list[Request],
         rebalance_interval_min: float = 30.0,
         forecast_lookahead_min: float = 60.0,
+        observer: InsertionObserver | None = None,
+        scorer: "LearnedScorer | None" = None,
+        scorer_mode: str = "rank",
+        scorer_top_k: int = 3,
+        scorer_filter_logit_threshold: float = -2.0,
     ) -> None:
-        super().__init__(fleet=fleet, oracle=oracle)
+        super().__init__(
+            fleet=fleet, oracle=oracle, observer=observer,
+            scorer=scorer, scorer_mode=scorer_mode, scorer_top_k=scorer_top_k,
+            scorer_filter_logit_threshold=scorer_filter_logit_threshold,
+        )
         self.partition = partition
         self._future = sorted(future_requests, key=lambda r: r.announce_time)
         self.rebalance_interval = rebalance_interval_min
@@ -57,14 +71,7 @@ class HierarchicalDispatcher(Dispatcher):
             if v.available_time < now:
                 v.available_time = now
 
-        best = None
-        for v in candidates:
-            r = best_insertion(v, request, self.oracle)
-            if r is None:
-                continue
-            if best is None or r.cost < best.cost:
-                best = r
-
+        best = self._pick_best_insertion(candidates, request)
         if best is None:
             return DispatchResult(request_id=request.id, vehicle_id=None, cost=float("inf"))
 
