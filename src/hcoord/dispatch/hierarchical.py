@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from hcoord.demand import Request
 from hcoord.dispatch.base import DispatchResult, Dispatcher
-from hcoord.dispatch.insertion import apply_insertion, best_insertion
+from hcoord.dispatch.insertion import InsertionObserver, apply_insertion, best_insertion
 from hcoord.fleet import Vehicle
 from hcoord.regions import Partition
 from hcoord.travel import TravelTimeOracle
@@ -33,8 +33,9 @@ class HierarchicalDispatcher(Dispatcher):
         future_requests: list[Request],
         rebalance_interval_min: float = 30.0,
         forecast_lookahead_min: float = 60.0,
+        observer: InsertionObserver | None = None,
     ) -> None:
-        super().__init__(fleet=fleet, oracle=oracle)
+        super().__init__(fleet=fleet, oracle=oracle, observer=observer)
         self.partition = partition
         self._future = sorted(future_requests, key=lambda r: r.announce_time)
         self.rebalance_interval = rebalance_interval_min
@@ -59,7 +60,7 @@ class HierarchicalDispatcher(Dispatcher):
 
         best = None
         for v in candidates:
-            r = best_insertion(v, request, self.oracle)
+            r = best_insertion(v, request, self.oracle, observer=self.observer)
             if r is None:
                 continue
             if best is None or r.cost < best.cost:

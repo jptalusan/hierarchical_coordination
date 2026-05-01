@@ -17,7 +17,7 @@ class MonolithicDispatcher(Dispatcher):
 
         best = None
         for v in self.fleet:
-            r = best_insertion(v, request, self.oracle)
+            r = best_insertion(v, request, self.oracle, observer=self.observer)
             if r is None:
                 continue
             if best is None or r.cost < best.cost:

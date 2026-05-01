@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from hcoord.demand import Request
+from hcoord.dispatch.insertion import InsertionObserver
 from hcoord.fleet import Vehicle
 from hcoord.travel import TravelTimeOracle
 
@@ -27,9 +28,16 @@ class DispatchResult:
 class Dispatcher(ABC):
     """Base class. Concrete dispatchers implement `assign`; `rebalance` is a no-op by default."""
 
-    def __init__(self, *, fleet: list[Vehicle], oracle: TravelTimeOracle) -> None:
+    def __init__(
+        self,
+        *,
+        fleet: list[Vehicle],
+        oracle: TravelTimeOracle,
+        observer: InsertionObserver | None = None,
+    ) -> None:
         self.fleet = fleet
         self.oracle = oracle
+        self.observer = observer
 
     @abstractmethod
     def assign(self, request: Request, now: float) -> DispatchResult:

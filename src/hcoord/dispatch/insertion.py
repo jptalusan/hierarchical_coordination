@@ -13,10 +13,13 @@ vehicles each considers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from hcoord.demand import Request
 from hcoord.fleet import Stop, Vehicle, feasible, return_arrival
 from hcoord.travel import TravelTimeOracle
+
+InsertionObserver = Callable[[Vehicle, Request, "InsertionResult | None"], None]
 
 DEFAULT_PICKUP_SERVICE: float = 1.0
 DEFAULT_DROPOFF_SERVICE: float = 1.0
@@ -72,8 +75,14 @@ def best_insertion(
     *,
     pickup_service: float = DEFAULT_PICKUP_SERVICE,
     dropoff_service: float = DEFAULT_DROPOFF_SERVICE,
+    observer: InsertionObserver | None = None,
 ) -> InsertionResult | None:
-    """Cheapest feasible insertion, or None if no (p, q) pair is feasible."""
+    """Cheapest feasible insertion, or None if no (p, q) pair is feasible.
+
+    If `observer` is provided, it is called once at the end with
+    `(vehicle, request, best)` (where `best` may be None) — useful for
+    collecting training data without modifying the dispatch loop.
+    """
     pickup, dropoff = _build_stops(request, pickup_service, dropoff_service)
     base_return = return_arrival(vehicle, oracle)
     n = len(vehicle.route)
@@ -102,6 +111,9 @@ def best_insertion(
                     dropoff_at=q,
                     cost=cost,
                 )
+
+    if observer is not None:
+        observer(vehicle, request, best)
     return best
 
 

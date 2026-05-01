@@ -56,6 +56,11 @@ class ExperimentConfig:
     rebalance_interval_min: float = 30.0
     forecast_lookahead_min: float = 60.0
 
+    # Learning data collection (optional). If `collect_to` is set, attach an
+    # `InsertionCollector` to the dispatcher and dump rows to that CSV path
+    # at the end of the run.
+    collect_to: str | None = None
+
 
 def _build_dispatcher(
     cfg: ExperimentConfig,
@@ -64,9 +69,10 @@ def _build_dispatcher(
     oracle: TravelTimeOracle,
     fleet: list[Any],
     requests: list[Any],
+    observer: Any = None,
 ) -> Dispatcher:
     if cfg.dispatcher == "monolithic":
-        return MonolithicDispatcher(fleet=fleet, oracle=oracle)
+        return MonolithicDispatcher(fleet=fleet, oracle=oracle, observer=observer)
     if cfg.dispatcher == "hierarchical":
         n_hubs = len(network.hubs)
         if not 1 <= cfg.n_regions <= n_hubs:
@@ -86,6 +92,7 @@ def _build_dispatcher(
             future_requests=requests,
             rebalance_interval_min=cfg.rebalance_interval_min,
             forecast_lookahead_min=cfg.forecast_lookahead_min,
+            observer=observer,
         )
     raise ValueError(f"unknown dispatcher: {cfg.dispatcher!r}")
 
@@ -132,8 +139,33 @@ def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
         **placement_kwargs,
     )
 
+    collector = None
+    if cfg.collect_to is not None:
+        from hcoord.learning.collector import InsertionCollector  # lazy: viz extra
+
+        # run_id makes (run_id, decision_id) globally unique across configs
+        # so concatenated dumps can be grouped without collision.
+        run_id = (
+            f"s{cfg.seed}_n{cfg.n_outskirts}_f{cfg.fleet_size}"
+            f"_i{cfg.intensity:g}_{cfg.dispatcher}"
+        )
+        if cfg.dispatcher == "hierarchical":
+            run_id += f"_k{cfg.n_regions}"
+        ctx = {
+            "run_id": run_id,
+            "seed": cfg.seed,
+            "network": cfg.network,
+            "n_outskirts": cfg.n_outskirts,
+            "fleet_size": cfg.fleet_size,
+            "intensity": cfg.intensity,
+            "dispatcher": cfg.dispatcher,
+            "n_regions": cfg.n_regions if cfg.dispatcher == "hierarchical" else 0,
+        }
+        collector = InsertionCollector(oracle, context=ctx)
+
     dispatcher = _build_dispatcher(
-        cfg, network=network, oracle=oracle, fleet=fleet, requests=requests
+        cfg, network=network, oracle=oracle, fleet=fleet, requests=requests,
+        observer=collector,
     )
 
     decisions: list[DecisionRecord] = []
@@ -151,5 +183,8 @@ def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
                 wall_time_s=wall,
             )
         )
+
+    if collector is not None and cfg.collect_to is not None:
+        collector.write_csv(cfg.collect_to)
 
     return compute_metrics(decisions, fleet, oracle)
