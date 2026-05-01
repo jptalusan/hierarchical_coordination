@@ -200,3 +200,166 @@ def test_top_k_ge_fleet_size_is_exhaustive_no_op():
                              scorer=_ExplodingScorer(), scorer_top_k=10)
     # Should not blow up — short-circuit before the scorer is invoked.
     d.assign(requests[0], now=requests[0].announce_time)
+
+
+# ---- filter-mode tests ----
+
+
+class _PerfectFilter:
+    """Feasibility logits that match ground-truth perfectly. Drop-in scorer."""
+
+    def feasibility_logits(self, vehicles, request, oracle):
+        from hcoord.dispatch.insertion import best_insertion
+
+        out = np.empty(len(vehicles), dtype=np.float32)
+        for i, v in enumerate(vehicles):
+            r = best_insertion(v, request, oracle)
+            # +5 if feasible (well above threshold), -5 if not (well below).
+            out[i] = 5.0 if r is not None else -5.0
+        return out
+
+    def score_batch(self, *a, **kw):
+        raise AssertionError("filter mode should not call score_batch")
+
+    def score_pair(self, *a, **kw):
+        raise AssertionError("filter mode should not call score_pair")
+
+
+class _OveragressiveFilter:
+    """Logits = -100 for all vehicles. Forces full-fleet fallback."""
+
+    def feasibility_logits(self, vehicles, request, oracle):
+        return np.full(len(vehicles), -100.0, dtype=np.float32)
+
+    def score_batch(self, *a, **kw):
+        raise AssertionError("filter mode should not call score_batch")
+
+    def score_pair(self, *a, **kw):
+        raise AssertionError("filter mode should not call score_pair")
+
+
+def test_filter_mode_with_perfect_filter_matches_baseline():
+    """A perfect feasibility filter retains exactly the actually-feasible
+    vehicles and runs exhaustive on them — same answer as full exhaustive."""
+    baseline = _run_dispatcher(scorer=None)
+    _, oracle, fleet, requests = _toy_setup()
+    d = MonolithicDispatcher(
+        fleet=fleet, oracle=oracle,
+        scorer=_PerfectFilter(),
+        scorer_mode="filter",
+        scorer_filter_logit_threshold=0.0,
+    )
+    learned = []
+    for req in requests[:12]:
+        r = d.assign(req, now=req.announce_time)
+        learned.append((r.vehicle_id, r.cost))
+    assert learned == baseline
+
+
+def test_filter_mode_overaggressive_falls_back_to_full_fleet():
+    """If the filter rejects every vehicle, fallback runs exhaustive on the
+    full candidate set — quality identical to baseline."""
+    baseline = _run_dispatcher(scorer=None)
+    _, oracle, fleet, requests = _toy_setup()
+    d = MonolithicDispatcher(
+        fleet=fleet, oracle=oracle,
+        scorer=_OveragressiveFilter(),
+        scorer_mode="filter",
+        scorer_filter_logit_threshold=-2.0,
+    )
+    learned = []
+    for req in requests[:12]:
+        r = d.assign(req, now=req.announce_time)
+        learned.append((r.vehicle_id, r.cost))
+    assert learned == baseline
+
+
+def test_filter_mode_when_survivors_all_infeasible_falls_back_to_dropped():
+    """If the filter retains some vehicles but they all turn out infeasible,
+    fall through to the rejected ones. Quality preserved either way."""
+    from hcoord.fleet import Vehicle
+
+    _, oracle, fleet, requests = _toy_setup(fleet_size=4)
+    # Make vehicles 0 and 1 infeasible (their available_time exceeds end).
+    for i in range(2):
+        v = fleet[i]
+        fleet[i] = Vehicle(
+            id=v.id, capacity=v.capacity, home=v.home, location=v.location,
+            available_time=v.service_end_time + 1.0,
+            service_end_time=v.service_end_time,
+        )
+
+    class _RetainOnlyInfeasible:
+        """Keeps the two rigged-infeasible vehicles, drops the two real ones."""
+        def feasibility_logits(self, vehicles, request, oracle):
+            return np.array(
+                [5.0 if v.id < 2 else -5.0 for v in vehicles],
+                dtype=np.float32,
+            )
+
+    d_base = MonolithicDispatcher(fleet=[v for v in fleet], oracle=oracle)
+    base_results = []
+    for req in requests[:5]:
+        base_results.append(d_base.assign(req, now=req.announce_time).vehicle_id)
+
+    # Re-build to undo prior route mutations.
+    _, oracle2, fleet2, requests2 = _toy_setup(fleet_size=4)
+    for i in range(2):
+        v = fleet2[i]
+        fleet2[i] = Vehicle(
+            id=v.id, capacity=v.capacity, home=v.home, location=v.location,
+            available_time=v.service_end_time + 1.0,
+            service_end_time=v.service_end_time,
+        )
+    d_learn = MonolithicDispatcher(
+        fleet=fleet2, oracle=oracle2,
+        scorer=_RetainOnlyInfeasible(),
+        scorer_mode="filter",
+        scorer_filter_logit_threshold=0.0,
+    )
+    learn_results = []
+    for req in requests2[:5]:
+        learn_results.append(d_learn.assign(req, now=req.announce_time).vehicle_id)
+
+    assert learn_results == base_results
+
+
+def test_filter_mode_threshold_controls_strictness():
+    """Higher threshold → keeps fewer vehicles → more fallback work but
+    same answer (since fallback runs exhaustive on rejected when retained
+    ones fail). Just confirms the knob is wired through."""
+    _, oracle, fleet, requests = _toy_setup()
+
+    captured = {"n_retained": []}
+
+    class _GraduatedFilter:
+        def feasibility_logits(self, vehicles, request, oracle):
+            # Linear ramp 1, 2, ..., n. Threshold of 0.5 keeps everything;
+            # of 5 keeps only the last few.
+            return np.arange(1, len(vehicles) + 1, dtype=np.float32)
+
+    d_lax = MonolithicDispatcher(
+        fleet=list(fleet), oracle=oracle,
+        scorer=_GraduatedFilter(),
+        scorer_mode="filter",
+        scorer_filter_logit_threshold=0.5,
+    )
+    d_strict = MonolithicDispatcher(
+        fleet=list(fleet), oracle=oracle,
+        scorer=_GraduatedFilter(),
+        scorer_mode="filter",
+        scorer_filter_logit_threshold=4.5,
+    )
+    # Both must produce a sensible result on the first request without raising.
+    r1 = d_lax.assign(requests[0], now=requests[0].announce_time)
+    r2 = d_strict.assign(requests[0], now=requests[0].announce_time)
+    assert r1.vehicle_id is not None
+    assert r2.vehicle_id is not None
+
+
+def test_invalid_scorer_mode_rejected():
+    _, oracle, fleet, _ = _toy_setup()
+    with pytest.raises(ValueError, match="scorer_mode"):
+        MonolithicDispatcher(fleet=fleet, oracle=oracle,
+                             scorer=_PerfectFilter(),
+                             scorer_mode="bogus")

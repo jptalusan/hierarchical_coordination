@@ -32,12 +32,22 @@ class DispatchResult:
 class Dispatcher(ABC):
     """Base class. Concrete dispatchers implement `assign`; `rebalance` is a no-op by default.
 
-    If `scorer` is provided, `_pick_best_insertion` uses it to rank candidate
-    vehicles by predicted cost, runs exhaustive (p, q) search on the top
-    `scorer_top_k`, and falls back to full exhaustive across the remaining
-    vehicles only if none of the top-K is feasible. The fallback path
-    guarantees the learned scorer never degrades the dispatcher's quality
-    versus the heuristic baseline.
+    If `scorer` is provided, `_pick_best_insertion` uses one of two modes:
+
+    - `mode="rank"`: rank candidates by predicted cost, exhaustive (p, q) on
+      the top `scorer_top_k`, fall back to exhaustive on the rest only if
+      all top-K are infeasible. Best when the model's cost ranking is
+      reliable.
+    - `mode="filter"`: drop candidates whose feasibility logit is below
+      `scorer_filter_logit_threshold` (i.e., model is confident they're
+      infeasible), then exhaustive over the survivors. Best when the
+      model's feasibility head is much more reliable than its cost ranking
+      — typical for the v1 MLP. Quality is bounded by the false-negative
+      rate of the feasibility classifier; the threshold lets the caller
+      tune the speed/quality tradeoff explicitly.
+
+    Either way, exhaustive (p, q) feasibility checks run on every retained
+    vehicle, so the dispatcher never returns an actually-infeasible result.
     """
 
     def __init__(
@@ -47,15 +57,23 @@ class Dispatcher(ABC):
         oracle: TravelTimeOracle,
         observer: InsertionObserver | None = None,
         scorer: "LearnedScorer | None" = None,
+        scorer_mode: str = "rank",
         scorer_top_k: int = 3,
+        scorer_filter_logit_threshold: float = -2.0,
     ) -> None:
         if scorer_top_k < 1:
             raise ValueError(f"scorer_top_k must be >= 1, got {scorer_top_k}")
+        if scorer_mode not in ("rank", "filter"):
+            raise ValueError(
+                f"scorer_mode must be 'rank' or 'filter', got {scorer_mode!r}"
+            )
         self.fleet = fleet
         self.oracle = oracle
         self.observer = observer
         self.scorer = scorer
+        self.scorer_mode = scorer_mode
         self.scorer_top_k = scorer_top_k
+        self.scorer_filter_logit_threshold = scorer_filter_logit_threshold
 
     @abstractmethod
     def assign(self, request: Request, now: float) -> DispatchResult:
@@ -71,30 +89,60 @@ class Dispatcher(ABC):
     ) -> InsertionResult | None:
         """Pick the best feasible insertion among `candidates`.
 
-        Without a scorer: exhaustive search across all candidates (the
-        heuristic baseline). With a scorer: rank candidates by predicted
-        score, run exhaustive (p, q) on the top-K only; if none is
-        feasible, fall back to exhaustive across the rest.
+        Dispatches to the configured mode. See class docstring.
         """
-        if self.scorer is None or len(candidates) <= self.scorer_top_k:
+        if self.scorer is None:
+            return self._exhaustive_pick(candidates, request)
+        if self.scorer_mode == "filter":
+            return self._filter_pick(candidates, request)
+        return self._rank_pick(candidates, request)
+
+    def _rank_pick(
+        self,
+        candidates: list[Vehicle],
+        request: Request,
+    ) -> InsertionResult | None:
+        if len(candidates) <= self.scorer_top_k:
             return self._exhaustive_pick(candidates, request)
 
-        scores = self.scorer.score_batch(candidates, request, self.oracle)
-        # argsort lifts ties stably; order from cheapest predicted to dearest.
         import numpy as np
 
+        scores = self.scorer.score_batch(candidates, request, self.oracle)
         order = np.argsort(scores)
         top_idx = list(order[: self.scorer_top_k])
         rest_idx = list(order[self.scorer_top_k :])
 
-        # Exhaustive (p, q) on the top-K only — this is the actual win.
         best = self._exhaustive_pick([candidates[i] for i in top_idx], request)
         if best is not None:
             return best
-
-        # All top-K were infeasible: fall back to the rest. Quality identical
-        # to the baseline, just slower than the happy path.
         return self._exhaustive_pick([candidates[i] for i in rest_idx], request)
+
+    def _filter_pick(
+        self,
+        candidates: list[Vehicle],
+        request: Request,
+    ) -> InsertionResult | None:
+        """Drop confident-infeasible candidates, run exhaustive on the rest.
+
+        If the survivor set is empty (every vehicle was predicted infeasible),
+        fall back to exhaustive over the full candidate list — guarantees we
+        never silently drop a feasible insertion just because the classifier
+        was uniformly pessimistic.
+        """
+        if not candidates:
+            return None
+
+        logits = self.scorer.feasibility_logits(candidates, request, self.oracle)
+        keep = logits >= self.scorer_filter_logit_threshold
+        survivors = [c for c, k in zip(candidates, keep) if k]
+        if not survivors:
+            return self._exhaustive_pick(candidates, request)
+        best = self._exhaustive_pick(survivors, request)
+        if best is not None:
+            return best
+        # All survivors were actually infeasible — try the dropped ones.
+        rest = [c for c, k in zip(candidates, keep) if not k]
+        return self._exhaustive_pick(rest, request)
 
     def _exhaustive_pick(
         self,

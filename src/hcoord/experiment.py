@@ -61,11 +61,16 @@ class ExperimentConfig:
     # at the end of the run.
     collect_to: str | None = None
 
-    # Learned scorer (optional). When set, the dispatcher uses the model to
-    # rank candidate vehicles, runs exhaustive (p, q) on the top-K, falls
-    # back to exhaustive on the rest if none of the top-K is feasible.
+    # Learned scorer (optional). `scorer_mode="rank"` ranks candidates by
+    # predicted cost and runs exhaustive (p, q) on the top-K (best when
+    # cost ranking is reliable). `scorer_mode="filter"` drops candidates
+    # the model is confident are infeasible (logit below threshold), then
+    # exhaustive on the rest (best when the v1 model's feasibility head
+    # is much more reliable than its cost ranking).
     scorer_path: str | None = None
+    scorer_mode: str = "rank"
     scorer_top_k: int = 3
+    scorer_filter_logit_threshold: float = -2.0
 
 
 def _build_dispatcher(
@@ -81,7 +86,10 @@ def _build_dispatcher(
     if cfg.dispatcher == "monolithic":
         return MonolithicDispatcher(
             fleet=fleet, oracle=oracle, observer=observer,
-            scorer=scorer, scorer_top_k=cfg.scorer_top_k,
+            scorer=scorer,
+            scorer_mode=cfg.scorer_mode,
+            scorer_top_k=cfg.scorer_top_k,
+            scorer_filter_logit_threshold=cfg.scorer_filter_logit_threshold,
         )
     if cfg.dispatcher == "hierarchical":
         n_hubs = len(network.hubs)
@@ -104,7 +112,9 @@ def _build_dispatcher(
             forecast_lookahead_min=cfg.forecast_lookahead_min,
             observer=observer,
             scorer=scorer,
+            scorer_mode=cfg.scorer_mode,
             scorer_top_k=cfg.scorer_top_k,
+            scorer_filter_logit_threshold=cfg.scorer_filter_logit_threshold,
         )
     raise ValueError(f"unknown dispatcher: {cfg.dispatcher!r}")
 

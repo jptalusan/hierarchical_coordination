@@ -40,10 +40,15 @@ class HierarchicalDispatcher(Dispatcher):
         forecast_lookahead_min: float = 60.0,
         observer: InsertionObserver | None = None,
         scorer: "LearnedScorer | None" = None,
+        scorer_mode: str = "rank",
         scorer_top_k: int = 3,
+        scorer_filter_logit_threshold: float = -2.0,
     ) -> None:
-        super().__init__(fleet=fleet, oracle=oracle, observer=observer,
-                         scorer=scorer, scorer_top_k=scorer_top_k)
+        super().__init__(
+            fleet=fleet, oracle=oracle, observer=observer,
+            scorer=scorer, scorer_mode=scorer_mode, scorer_top_k=scorer_top_k,
+            scorer_filter_logit_threshold=scorer_filter_logit_threshold,
+        )
         self.partition = partition
         self._future = sorted(future_requests, key=lambda r: r.announce_time)
         self.rebalance_interval = rebalance_interval_min

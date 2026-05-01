@@ -89,8 +89,31 @@ class LearnedScorer:
         """Lower-is-better scores for a list of vehicles, one shared request."""
         if not vehicles:
             return np.empty(0, dtype=np.float32)
+        X = self._batch_inputs(vehicles, request, oracle)
+        return self.model.score(X).numpy()
+
+    @torch.no_grad()
+    def feasibility_logits(
+        self,
+        vehicles: list[Vehicle],
+        request: Request,
+        oracle: TravelTimeOracle,
+    ) -> np.ndarray:
+        """Raw feasibility logits per vehicle. Higher = more likely feasible."""
+        if not vehicles:
+            return np.empty(0, dtype=np.float32)
+        X = self._batch_inputs(vehicles, request, oracle)
+        feas_logit, _ = self.model(X)
+        return feas_logit.numpy()
+
+    def _batch_inputs(
+        self,
+        vehicles: list[Vehicle],
+        request: Request,
+        oracle: TravelTimeOracle,
+    ) -> torch.Tensor:
         rows = [
             self._vectorize(extract_features(v, request, oracle)) for v in vehicles
         ]
         X = self.standardizer.transform(np.stack(rows, axis=0)).astype(np.float32)
-        return self.model.score(torch.from_numpy(X)).numpy()
+        return torch.from_numpy(X)
