@@ -297,6 +297,125 @@ evidence is worth running.
    repo, switch metric to expected on-time arrival. ~1 week.
 4. **Learned LLP (cost approximation).** Replace exhaustive (p,q) search
    with a small NN scoring head. ~1 week. See section below.
+
+---
+
+## 7. Learned LLP — v1 attempt (branch `feat/hlp-llp`)
+
+Built end-to-end (data collection → train → plug-in) on branch
+`feat/hlp-llp` (commits `b9dcde3`, `a748806`, `ca3ace1`, `95cfe3b`).
+Mechanically works; **bottleneck is the v1 model's regret**, not the
+plug-in plumbing.
+
+### What was built
+
+- `src/hcoord/learning/`
+  - `features.py` — 28 scalar features (request, vehicle, pair,
+    route summary). 21 used for training (drop categorical zone IDs
+    that have inconsistent meaning across seeds).
+  - `collector.py` — `InsertionCollector` observer: hooks
+    `best_insertion`, records (vehicle, request, features, cost,
+    feasible) per candidate.
+  - `dataset.py` — load CSV, split by `run_id`, z-score with reusable
+    `Standardizer`.
+  - `model.py` — two-headed MLP (feasibility logit + log1p-cost) at
+    21 → 64 → 64 → {1, 1}.
+  - `train.py` — training loop, per-row + per-decision metrics
+    (regret, top-K), best-epoch checkpointing.
+  - `inference.py` — `LearnedScorer.score_pair / .score_batch`
+    adapter for the dispatcher.
+- `src/hcoord/dispatch/base.py` — `_pick_best_insertion(candidates,
+  request)` factored out of both dispatchers. With no scorer:
+  exhaustive over all candidates. With scorer: top-K candidate
+  selection (by predicted score), exhaustive (p, q) on top-K only,
+  fall back to exhaustive on the rest *only if all top-K are
+  infeasible*.
+- Data collection: 18 monolithic configs (seeds 11/23/37, fleets
+  60/120, intensities 1/3/5) → 389,880 rows, 41 columns. Driver:
+  `scripts/collect_dataset.py`.
+- Training: split by seed (train: 11+23, test: 37) so the held-out
+  runs have a different sampled outskirt layout. Driver:
+  `scripts/train_scorer.py`.
+
+### Trained model metrics on held-out seed=37 (saved to `scorer.eval.json`)
+
+- feasibility accuracy: **98.9%**
+- per-row cost MAE: **0.52 min** (on costs averaging ~50 min)
+- per-decision **median regret: 0.0 min** (half the held-out
+  decisions match the heuristic argmin or tie it)
+- mean regret 11.6 min; **p95 regret 50.4 min** — the long tail.
+- top-1 accuracy 49.8%, top-3 53.0%
+- model_pick_infeasible_rate 6.8%
+
+### End-to-end sweep (heuristic vs learned, top_k=5, seed=11; `learned_llp/`)
+
+Speedup is solid at scale (3–7× depending on cell), but assignment
+rate drops, especially at saturation:
+
+| cell                       | heur assign | learned assign | Δpp     | speedup |
+|----------------------------|-------------|----------------|---------|---------|
+| mono fleet=240 int=5       | 98.4%       | 96.6%          | −1.8    | 7.7×    |
+| mono fleet=120 int=5       | 83.5%       | 62.3%          | **−21.2** | 2.3×  |
+| hier K=5 fleet=120 int=5   | 90.1%       | 70.9%          | **−19.1** | 2.8×  |
+| hier K=5 fleet=60 int=3    | 74.5%       | 61.6%          | **−13.0** | 1.5×  |
+| light loads (any cell)     | ≈100%       | ≈100%          | ≈0      | 2–4×    |
+
+### Why the saturation gap is the model, not top-K
+
+A scan of `scorer_top_k ∈ {5, 10, 15, 25, 50}` at the worst cell
+(mono fleet=120 intensity=5) across 3 seeds:
+
+| seed | heur | k=5 | k=10 | k=15 | k=25 | k=50 |
+|------|------|-----|------|------|------|------|
+| 11   | 83.5%| 62.3%| 64.4%| 65.4%| 74.3%| 81.4% |
+| 23   | 68.3%| 60.9%| 61.2%| 61.8%| 65.0%| 63.4% |
+| 37   | 92.2%| 59.2%| 63.9%| 67.5%| 76.4%| 91.2% |
+
+Even at k=50 (out of 120 candidates — almost no speedup left), seed
+23 only crawls from 60.9% to 63.4%, far short of the 68.3%
+heuristic. Seeds 11 and 37 close most of the gap at k=50 but at the
+cost of the speedup. **The model has p95 regret of 50 min, and
+when the model's argmin is in the top-K but the heuristic's argmin
+is also in the top-K and cheaper, top-K-then-exhaustive picks the
+model's argmin first** (incorrect on a tie-broken-wrong basis).
+
+Diagnosis: the v1 feature set under-discriminates. With many
+empty-route vehicles all parked at one of 5 hubs, vehicle features
+collapse to (home_hub, available_time) — the model can't tell two
+hub-A vehicles apart, so it picks essentially arbitrarily within a
+hub. Once a request lands on a poor pick, the route fills up, and
+later requests get dropped that the heuristic would have absorbed.
+
+### Concrete next moves to close the gap (ordered by expected payoff)
+
+1. **Train on hierarchical data, not monolithic.** Hierarchical
+   restricts candidates to within-region (~6–48 vehicles), so the
+   training distribution matches inference at hier K=5. Re-collect
+   from `dispatcher=hierarchical, n_regions=5` and retrain. ~½ day.
+2. **Add sequence features for the route.** Currently summarized as
+   {min, mean, last_zone, n_pickups, n_dropoffs}; a small Transformer
+   or set-encoder over stops would help discriminate between
+   superficially-similar vehicles. ~1 week.
+3. **Verify-and-refine fallback.** After picking the top-K argmin,
+   run exhaustive on candidates whose *predicted* score is within
+   Δ of the chosen vehicle's *true* cost. Conditional second pass.
+   Δ must be calibrated. ~1–2 days.
+4. **Multi-seed training data.** Currently trained on 3 seeds; bump
+   to 10–15 and retrain. ~½ day to collect, ~10 min to retrain.
+5. **Larger / regularized model.** Try 128-dim hidden + dropout +
+   longer training with LR scheduler. ~1 day.
+
+### Status
+
+Step 1–3 of the plan landed and committed; step 4 (robustness
+sweeps) deferred until the model can match heuristic quality at
+saturation. The infrastructure is sound — the path is validated.
+What's missing is a strong-enough model.
+
+Artifacts (in `write-up/learned_llp/`):
+- `results.csv` — 36-cell heuristic-vs-learned sweep (top_k=5).
+- `wall_vs_fleet.png`, `assignment_vs_fleet.png` — comparison plots.
+- `scorer.eval.json` — full training metric history.
 5. **Learned HLP (rebalancing policy).** DDQN over region demand
    features, similar to Sivagnanam. ~2 weeks. See section below.
 6. **Multi-modal (microtransit + fixed routes).** Add a feeder-line
