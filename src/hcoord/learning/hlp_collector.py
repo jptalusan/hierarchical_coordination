@@ -49,6 +49,13 @@ class HLPCollector:
         targets: dict[int, int],
         now: float,
     ) -> None:
+        # `now_min` already lives in `state` (set by extract_hlp_state). We
+        # don't overwrite it. Step 2 (hindsight-optimal perturbations) joins
+        # perturbed rollouts to the original ticks via (run_id, now_min) —
+        # which is byte-stable across re-runs of the same config since
+        # request announce times are pre-generated and rebalance throttling
+        # is deterministic. `tick_id` is a convenience monotonic counter;
+        # do not key on it across runs.
         self._tick_id += 1
         row: dict[str, Any] = dict(self.context)
         row.update(state)
@@ -57,7 +64,6 @@ class HLPCollector:
                 float(targets[slot]) if slot in targets else float("nan")
             )
         row["tick_id"] = self._tick_id
-        row["now_min"] = float(now)
         self._rows.append(row)
 
     def __len__(self) -> int:

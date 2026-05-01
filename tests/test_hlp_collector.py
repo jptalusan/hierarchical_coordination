@@ -78,6 +78,53 @@ def test_per_region_features_idle_count_respects_now():
     assert feats["mean_route_len"] == 0.0
 
 
+def test_per_region_features_idle_count_excludes_busy_vehicles():
+    """Negative direction: a vehicle whose `available_time > now` must NOT
+    be counted as idle. The positive-only test above would silently pass a
+    bug that returned `n_vehicles` for `n_idle_now` unconditionally."""
+    _, oracle, partition, fleet, region_of = _toy_setup()
+    # Force the first 3 region-0 vehicles to be "busy" (available_time later
+    # than the snapshot time `now=120`).
+    in_region_0 = [v for v in fleet if region_of[v.id] == 0]
+    assert len(in_region_0) >= 3
+    for v in in_region_0[:3]:
+        v.available_time = 200.0  # > now=120
+    feats_busy = per_region_features(
+        0,
+        fleet=fleet,
+        region_of=region_of,
+        partition=partition,
+        oracle=oracle,
+        demand_count=0,
+        now=120.0,
+    )
+    # n_vehicles stays the same (region membership unchanged).
+    assert feats_busy["n_vehicles"] == float(len(in_region_0))
+    # But idle count drops by exactly 3.
+    assert feats_busy["n_idle_now"] == float(len(in_region_0) - 3)
+
+
+def test_per_region_features_idle_count_at_epsilon_boundary():
+    """The implementation tolerates `available_time <= now + 1e-9`. Vehicles
+    sitting exactly at `now` (or within epsilon) should be counted idle;
+    vehicles further out should not."""
+    _, oracle, partition, fleet, region_of = _toy_setup()
+    in_region_0 = [v for v in fleet if region_of[v.id] == 0]
+    assert len(in_region_0) >= 2
+    in_region_0[0].available_time = 120.0          # at boundary -> idle
+    in_region_0[1].available_time = 120.0 + 1e-3   # past tolerance -> NOT idle
+    feats = per_region_features(
+        0,
+        fleet=fleet,
+        region_of=region_of,
+        partition=partition,
+        oracle=oracle,
+        demand_count=0,
+        now=120.0,
+    )
+    assert feats["n_idle_now"] == float(len(in_region_0) - 1)
+
+
 def test_extract_hlp_state_pads_unused_region_slots():
     _, oracle, partition, fleet, region_of = _toy_setup()
     state = extract_hlp_state(
@@ -185,3 +232,38 @@ def test_max_regions_guard():
     are only 5 hubs in the substrate so this is a structural assertion."""
     _, oracle, partition, fleet, region_of = _toy_setup()
     assert partition.n_regions <= MAX_REGIONS
+
+
+def test_collect_hlp_to_now_min_is_byte_stable_across_reruns(tmp_path: Path):
+    """Step 2 will perturb the heuristic's allocation and re-run the day to
+    measure downstream-assignment-rate. To match perturbed-rollout ticks
+    back to the original collector's rows, the join key MUST be stable.
+
+    The chosen key is `(run_id, now_min)`. This test pins down the
+    contract: two identical-config runs produce identical `now_min`
+    values at every tick. If a future change introduces nondeterminism
+    (RNG leak, dict ordering, etc.), this test catches it before step 2's
+    hindsight labels go silently miscoded."""
+    out_a = tmp_path / "a.csv"
+    out_b = tmp_path / "b.csv"
+    cfg = ExperimentConfig(
+        seed=7, fleet_size=8, intensity=2.0,
+        n_outskirts=10, network="synthetic",
+        dispatcher="hierarchical", n_regions=3,
+    )
+    for path in (out_a, out_b):
+        cfg.collect_hlp_to = str(path)
+        run_experiment(cfg)
+    with out_a.open() as f:
+        rows_a = list(csv.DictReader(f))
+    with out_b.open() as f:
+        rows_b = list(csv.DictReader(f))
+    assert len(rows_a) == len(rows_b)
+    assert len(rows_a) > 0
+    for a, b in zip(rows_a, rows_b):
+        assert a["now_min"] == b["now_min"]
+        assert a["tick_id"] == b["tick_id"]
+        # All target columns also match — the heuristic allocation is
+        # deterministic from the same state.
+        for slot in range(3):
+            assert a[f"target_r{slot}"] == b[f"target_r{slot}"]
