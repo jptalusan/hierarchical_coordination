@@ -9,6 +9,13 @@
 
 seed: 11
 
+# Network
+network: synthetic         # "synthetic" | "memphis_osm"
+n_outskirts: 25
+osm_inner_km: 8.0
+osm_outer_km: 40.0
+osm_cache_dir: data/osm_cache
+
 # Fleet
 fleet_size: 30
 capacity: 6

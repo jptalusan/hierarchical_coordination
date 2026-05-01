@@ -39,3 +39,14 @@ tests/
 uv sync --all-extras
 uv run pytest
 ```
+
+## Real-OSM Memphis substrate
+
+Optional `[osm]` extra adds `osmnx` + `scikit-learn`. First call pulls the
+Memphis drive network from OSM Overpass (~30 s) and caches the graph plus
+the built `Network` to `data/osm_cache/`. Subsequent calls return instantly.
+
+```
+uv sync --extra osm
+uv run python -m hcoord network=memphis_osm dispatcher=hierarchical n_regions=3
+```

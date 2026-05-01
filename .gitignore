@@ -24,6 +24,10 @@ htmlcov/
 outputs/
 multirun/
 
+# OSM caches
+cache/
+data/osm_cache/
+
 # IDE
 .idea/
 .vscode/

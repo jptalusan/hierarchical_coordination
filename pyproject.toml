@@ -14,6 +14,10 @@ dev = [
     "pytest>=8",
     "ruff>=0.5",
 ]
+osm = [
+    "osmnx>=2.1.0",
+    "scikit-learn>=1.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]

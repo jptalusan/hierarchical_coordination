@@ -29,18 +29,28 @@ from hcoord.travel import TravelTimeOracle
 @dataclass
 class ExperimentConfig:
     seed: int = 11
+
+    # Network
+    network: str = "synthetic"  # "synthetic" | "memphis_osm"
+    n_outskirts: int = 25
+    osm_inner_km: float = 8.0
+    osm_outer_km: float = 40.0
+    osm_cache_dir: str = "data/osm_cache"
+
+    # Fleet
     fleet_size: int = 30
     capacity: int = 6
     service_end_time: float = 24 * 60.0
-
     placement: str = "hubs"
 
+    # Demand
     intensity: float = 1.0
     base_rate: float = 0.4
     structural_zero_prob: float = 0.4
     announce_lead_min: float = 90.0
     arrival_buffer_min: float = 15.0
 
+    # Dispatcher
     dispatcher: str = "monolithic"
     n_regions: int = 5
     rebalance_interval_min: float = 30.0
@@ -80,8 +90,24 @@ def _build_dispatcher(
     raise ValueError(f"unknown dispatcher: {cfg.dispatcher!r}")
 
 
+def _build_network(cfg: ExperimentConfig) -> Any:
+    if cfg.network == "synthetic":
+        return build_memphis_outskirts(seed=cfg.seed, n_outskirts=cfg.n_outskirts)
+    if cfg.network == "memphis_osm":
+        from hcoord.geography_osm import build_memphis_osm  # lazy import
+
+        return build_memphis_osm(
+            seed=cfg.seed,
+            n_outskirts=cfg.n_outskirts,
+            inner_radius_km=cfg.osm_inner_km,
+            outer_radius_km=cfg.osm_outer_km,
+            cache_dir=cfg.osm_cache_dir,
+        )
+    raise ValueError(f"unknown network: {cfg.network!r}")
+
+
 def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
-    network = build_memphis_outskirts(seed=cfg.seed)
+    network = _build_network(cfg)
     oracle = TravelTimeOracle(network)
     requests = generate_requests(
         network,
