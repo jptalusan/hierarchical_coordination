@@ -61,6 +61,10 @@ class ExperimentConfig:
     # at the end of the run.
     collect_to: str | None = None
 
+    # HLP rebalance-decision data collection (optional). One row per
+    # rebalance tick: per-region state + heuristic's chosen target counts.
+    collect_hlp_to: str | None = None
+
     # Learned scorer (optional). `scorer_mode="rank"` ranks candidates by
     # predicted cost and runs exhaustive (p, q) on the top-K (best when
     # cost ranking is reliable). `scorer_mode="filter"` drops candidates
@@ -82,6 +86,7 @@ def _build_dispatcher(
     requests: list[Any],
     observer: Any = None,
     scorer: Any = None,
+    hlp_observer: Any = None,
 ) -> Dispatcher:
     if cfg.dispatcher == "monolithic":
         return MonolithicDispatcher(
@@ -115,6 +120,7 @@ def _build_dispatcher(
             scorer_mode=cfg.scorer_mode,
             scorer_top_k=cfg.scorer_top_k,
             scorer_filter_logit_threshold=cfg.scorer_filter_logit_threshold,
+            hlp_observer=hlp_observer,
         )
     raise ValueError(f"unknown dispatcher: {cfg.dispatcher!r}")
 
@@ -191,9 +197,28 @@ def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
 
         scorer = LearnedScorer.from_checkpoint(cfg.scorer_path)
 
+    hlp_collector = None
+    if cfg.collect_hlp_to is not None:
+        from hcoord.learning.hlp_collector import HLPCollector  # lazy: viz extra
+
+        hlp_run_id = (
+            f"s{cfg.seed}_n{cfg.n_outskirts}_f{cfg.fleet_size}"
+            f"_i{cfg.intensity:g}_k{cfg.n_regions}"
+        )
+        hlp_ctx = {
+            "run_id": hlp_run_id,
+            "seed": cfg.seed,
+            "network": cfg.network,
+            "n_outskirts": cfg.n_outskirts,
+            "fleet_size": cfg.fleet_size,
+            "intensity": cfg.intensity,
+            "n_regions": cfg.n_regions,
+        }
+        hlp_collector = HLPCollector(context=hlp_ctx)
+
     dispatcher = _build_dispatcher(
         cfg, network=network, oracle=oracle, fleet=fleet, requests=requests,
-        observer=collector, scorer=scorer,
+        observer=collector, scorer=scorer, hlp_observer=hlp_collector,
     )
 
     decisions: list[DecisionRecord] = []
@@ -214,5 +239,7 @@ def run_experiment(cfg: ExperimentConfig) -> RunMetrics:
 
     if collector is not None and cfg.collect_to is not None:
         collector.write_csv(cfg.collect_to)
+    if hlp_collector is not None and cfg.collect_hlp_to is not None:
+        hlp_collector.write_csv(cfg.collect_hlp_to)
 
     return compute_metrics(decisions, fleet, oracle)
