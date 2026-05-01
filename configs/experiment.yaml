@@ -35,11 +35,31 @@ n_regions: 5               # only used when dispatcher=hierarchical (1..5)
 rebalance_interval_min: 30.0
 forecast_lookahead_min: 60.0
 
+# Learning data collection (LLP). When set, run dumps per-candidate features
+# + ground-truth cost rows to this CSV path. Null = no collection.
+collect_to: null
+
+# Learned LLP plug-in. scorer_path null => heuristic LLP (exhaustive over
+# candidates). When set, dispatcher uses the trained MLP scorer.
+#   scorer_mode: "rank" | "filter" | "stacked"
+#     rank    — top-K by predicted cost, exhaustive on top-K then fallback
+#     filter  — drop confident-infeasibles, exhaustive on survivors
+#     stacked — filter then top-K-by-cost on survivors (most aggressive)
+#   scorer_top_k: K for rank/stacked modes
+#   scorer_filter_logit_threshold: drop candidates with feasibility logit
+#     below this. -4.0 ≈ keep unless P(feasible) < 1.8% (quality-preserving).
+scorer_path: null
+scorer_mode: rank
+scorer_top_k: 3
+scorer_filter_logit_threshold: -2.0
+
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d_%H-%M-%S}_${dispatcher}
   sweep:
     dir: multirun/${now:%Y-%m-%d_%H-%M-%S}
-    subdir: ${dispatcher}_F${fleet_size}_I${intensity}_K${n_regions}_${placement}
+    # `${hydra.job.num}` disambiguates runs whose only difference is a
+    # scorer_path (heuristic vs learned LLP) — those don't collide now.
+    subdir: ${hydra.job.num}_${dispatcher}_F${fleet_size}_I${intensity}_K${n_regions}_${placement}
   job:
     chdir: false
