@@ -111,12 +111,17 @@ def _per_decision_metrics(
             continue
         n_decisions += 1
         feasible_local = idx[feas_in_group]
-        true_argmin = feasible_local[np.argmin(split.cost[feasible_local])]
-        true_min_cost = float(split.cost[true_argmin])
+        true_min_cost = float(np.min(split.cost[feasible_local]))
+        # Set of optimal vehicles — accounts for ties: a learned pick that
+        # matches any vehicle whose true cost equals the minimum is correct.
+        true_optimal_set = set(
+            int(i) for i in feasible_local
+            if float(split.cost[i]) <= true_min_cost + 1e-9
+        )
         order = idx[np.argsort(scores[idx])]
         model_pick = order[0]
         for k in k_values:
-            topk_hits[k].append(true_argmin in order[:k])
+            topk_hits[k].append(any(int(i) in true_optimal_set for i in order[:k]))
 
         if not split.feasible[model_pick]:
             infeas_picks += 1
@@ -170,6 +175,11 @@ def train_scorer(
 
     loader = _make_loader(train_split, train_cfg.batch_size, shuffle=True)
     history: list[dict[str, Any]] = []
+    # Track best test cost MAE; we save that checkpoint instead of the last
+    # epoch since validation metrics oscillate at convergence.
+    best_state_dict: dict[str, Any] | None = None
+    best_score = float("inf")
+    best_epoch = -1
     for epoch in range(train_cfg.n_epochs):
         model.train()
         epoch_total = 0.0
@@ -205,6 +215,10 @@ def train_scorer(
             "test_cost_mae": test_metrics["cost_mae_feasible"],
         }
         history.append(rec)
+        if not np.isnan(rec["test_cost_mae"]) and rec["test_cost_mae"] < best_score:
+            best_score = rec["test_cost_mae"]
+            best_state_dict = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch + 1
         if (epoch + 1) % log_every == 0 or epoch == 0:
             print(
                 f"epoch {epoch + 1:3d}/{train_cfg.n_epochs} | "
@@ -215,10 +229,16 @@ def train_scorer(
                 flush=True,
             )
 
+    # Restore best-by-cost-MAE epoch before computing final per-decision metrics.
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        print(f"Restored best epoch {best_epoch} (test cost MAE {best_score:.3f} min)")
+
     per_dec = _per_decision_metrics(model, test_split)
     final_metrics = {
         **_epoch_metrics(model, test_split),
         **per_dec,
+        "best_epoch": best_epoch,
         "n_train_rows": int(len(train_split.X)),
         "n_test_rows": int(len(test_split.X)),
     }

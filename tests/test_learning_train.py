@@ -93,6 +93,12 @@ def test_prepare_round_trip_and_train_test_use_same_standardizer():
     # Test z-scores reuse train's mean/std (so test stats may differ).
     assert train_split.feature_names == test_split.feature_names
     assert train_split.X.shape[1] == len(CONTINUOUS_FEATURES)
+    # Strong no-leak assertion: the test rows were transformed using the train
+    # standardizer (not refitted), so manually applying (raw - train_mean)/train_std
+    # to the test rows must reproduce test_split.X exactly.
+    raw_test = test_df[list(CONTINUOUS_FEATURES)].to_numpy(dtype=np.float32)
+    expected = ((raw_test - std.mean) / std.std).astype(np.float32)
+    np.testing.assert_allclose(test_split.X, expected, rtol=1e-6, atol=1e-6)
 
 
 def test_model_forward_shapes():
