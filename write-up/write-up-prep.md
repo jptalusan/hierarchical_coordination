@@ -1,5 +1,10 @@
 # Write-up prep — hierarchical decomposition for multi-modal DVRP
 
+> **NSF whitepaper:** `whitepaper/thrust2_hierarchical_coordination.tex`
+> condenses the preliminary-evidence story into 1-2 pages aligned to
+> Thrust 2 RQ 4/5, Barriers 1-3, and the M2/M4 milestones. Numbers below
+> sourced; numbers in the .tex match Table 1 (`learned_llp/aggregated_stacked.csv`).
+
 Reference doc for the eventual proposal write-up. Captures substrate,
 sweep configurations, and headline numbers so we can pull from this
 once the proposal section scaffold is clear. Figures and raw CSVs live
@@ -284,6 +289,26 @@ These are explicit limitations to call out or extensions to point to:
   - `src/hcoord/regions.py` — partitioning + hub agglomeration.
   - `src/hcoord/analysis.py` — sweep runner + plot helpers.
   - `src/hcoord/geography_osm.py` — OSM substrate.
+
+## 6.5. Learned HLP — spot-checked, parked as v2
+
+Branch `feat/hlp` step 1 built the data-collection scaffold (state +
+allocation per rebalance tick) and step 2-B asked the prerequisite
+question: at v1 scale, is the heuristic's allocation beatable enough
+to justify supervised hindsight-label training?
+
+Spot-check (5 configs × N ticks × 5–10 random perturbations of the
+heuristic's per-tick allocation): **~27% of ticks beatable by >0.5pp,
+max gain +3.14pp at the constrained-high-K corner**. Signal lives only
+at fleet-constrained corners; light and moderate loads show zero
+learnable signal because the heuristic's perfect-demand-oracle +
+proportional-to-demand allocation is already near-optimal at this state
+size (5 hubs, 5 regions).
+
+Decision: **park learned HLP as a v2 axis behind multi-modal**. The
+infrastructure (`hlp_features.py`, `hlp_collector.py`) is left in place;
+data collection is one CLI flag away (`collect_hlp_to=...`). Full write-up
+in `write-up/learned_hlp/spot_check_findings.md`.
 
 ## 6. Possible v2 axes (in roughly cost order)
 

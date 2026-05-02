@@ -1,0 +1,197 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=0.85in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{caption}
+
+\titleformat{\section}[runin]{\bfseries\large}{\thesection.}{0.5em}{}[.]
+\titleformat{\subsection}[runin]{\bfseries}{\thesubsection.}{0.5em}{}[.]
+\titlespacing*{\section}{0pt}{0.6em}{0.5em}
+\titlespacing*{\subsection}{0pt}{0.4em}{0.4em}
+\setlength{\parskip}{0.25em}
+\setlength{\parindent}{0pt}
+\captionsetup{font=small,labelfont=bf,skip=2pt}
+
+\title{\vspace{-2em}\textbf{Hierarchical Coordination for Real-Time
+Multi-Modal Microtransit Dispatch:\\
+Preliminary Evidence for NSF TTP-T Thrust 2}\vspace{-0.5em}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-3em}
+
+\section{Motivation and Research Question}
+Thrust~2 (\emph{Robust Real-Time Operations for Workforce Commute}) targets
+the dispatching layer of a multi-modal rural transit system. The dispatcher
+must place hundreds to thousands of on-demand vehicles against time-windowed,
+shift-synchronized demand under stochastic travel times. RQ~5 explicitly
+proposes \textit{``hierarchical decomposition together with
+reinforcement-learning techniques''} to scale to realistic networks. This
+white paper reports preliminary evidence that hierarchical coordination is
+viable as the operational backbone of Thrust~2, identifies which sub-problem
+admits learning-based gains at v1 scale, and frames how the result composes
+with Thrust~2's uncertainty-aware traffic models (Barrier~1) and the
+digital-twin evaluation environment (Barrier~3).
+
+\section{Approach}
+We instantiate RQ~5's hierarchical control framework as a two-level
+\textbf{HLP/LLP} decomposition. The \textbf{High-Level Planner} (HLP)
+periodically partitions the fleet across hub-catchment regions on a forecast
+window. The \textbf{Low-Level Planner} (LLP) performs per-region greedy
+insertion of incoming requests, subject to capacity, time-window, and
+return-to-depot feasibility. Decomposition is over the hub set rather than
+$k$-means clusters of historical demand, because workforce commute is
+destination-anchored.
+
+The substrate is a real Memphis OSM drive network (5 hubs, up to 65 zones,
+$\le$1{,}019 requests/day) with a perfect-information demand oracle as the
+deterministic upper bound. Dispatch wall-time and on-time arrival are
+measured against a flat \textbf{monolithic} baseline. Both planners are
+configurable as \textit{heuristic} or \textit{learned}, so all four
+combinations are sweepable from a single Hydra config.
+
+\section{Preliminary Results}
+\textbf{(i) Hierarchical decomposition alone delivers a clean speedup.} A
+hub-catchment HLP plus heuristic greedy LLP gives a stable
+$3.0\text{--}4.0\times$ per-decision wall-time speedup over the monolithic
+baseline across fleet$\times$intensity grids on both 30- and 65-zone
+substrates, with quality at parity at saturation and \emph{better} at
+constrained corners (anti-vampire effect: regions stop one greedy decision
+from draining a far-away vehicle; +12.8\,pp at fleet=60, intensity=3, K=5).
+
+\textbf{(ii) A learned LLP compounds with hierarchical decomposition.}
+Trained as a two-headed MLP (feasibility logit + log-cost regression) on
+390k (vehicle, request) candidate evaluations, the model achieves
+$98.9\%$ feasibility accuracy and $0.52$\,min cost MAE. The naive
+\textit{rank-mode} plug-in (top-$K$ by predicted cost) under-performs at
+saturation due to cost-ranking error; using only the model's reliable
+feasibility head as a \textit{filter} (drop candidates with
+$P(\text{feas.})<0.018$, exhaustive $(p,q)$ on survivors) preserves quality.
+\textit{Stacked-mode} (filter then top-$K$ by cost on survivors) recovers
+additional speedup. Compounded factors versus \textit{mono+heur} baseline
+are reported in Table~\ref{tab:speedup}; Fig.~\ref{fig:wall} shows the full
+speed--quality picture.
+
+\textbf{(iii) A learned HLP yields insufficient signal at v1 scale.}
+Spot-checking the heuristic HLP allocation against random
+$\pm$5-vehicle perturbations (re-running the day with the
+override at one rebalance tick) found only $\sim$27\% of ticks beatable
+by $>$0.5\,pp, with peak gain $+3.14$\,pp at a single constrained-corner
+tick and $\approx$0\,pp at light or moderate loads. With 5 hubs and a
+perfect-information demand oracle, the proportional-to-demand heuristic
+is near-optimal: there is little room to learn. Learned HLP is parked as a
+v2 axis behind the multi-modal extension, where mode-mix and stochastic
+travel will materially expand the action space; the data-collection
+infrastructure is in place for cheap re-entry.
+
+\begin{table}[ht]
+\small
+\centering
+\caption{Speedup factor (mean per-decision wall-time, vs.\ \textit{mono+heur}
+baseline) and on-time arrival delta (percentage points) at three
+representative cells on the 30-zone Memphis OSM substrate, mean over
+3 seeds. Filter mode preserves quality across the grid; stacked mode is
+the upper bound at the cost of partial saturation regret.}
+\label{tab:speedup}
+\begin{tabular}{lccc cccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Speedup factor (vs.\ baseline)}}
+& & \multicolumn{3}{c}{\textbf{$\Delta$on-time (pp)}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){6-8}
+\textbf{Operating cell} & hier+heur & hier+filter & hier+stacked
+& & hier+filter & hier+stacked \\
+\midrule
+fleet=120, int=3 (moderate)
+& 3.59$\times$ & 8.23$\times$ & 9.92$\times$ & & $-3.3$ & $-7.1$ \\
+fleet=120, int=5 (saturated)
+& 3.70$\times$ & 8.06$\times$ & 8.98$\times$ & & $+3.5$ & $-12.1$ \\
+fleet=240, int=5 (heavy load) %
+& 3.81$\times$ & \textbf{11.67}$\times$ & \textbf{17.90}$\times$ & & $0.0$ & $-1.4$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\textwidth]{../learned_llp/wall_vs_fleet.png}
+\vspace{-0.5em}
+\caption{Mean per-decision wall-time across fleet sizes (log-scale) on
+real Memphis OSM, three intensity panels. Each line is one HLP/LLP
+combination averaged over 3 seeds. The hierarchical+learned-LLP filter
+arm holds quality at the heuristic decomposition's level while compounding
+the per-decision speedup.}
+\label{fig:wall}
+\end{figure}
+
+\vspace{-0.5em}
+
+\section{Composition with Uncertainty Modeling (Thrust~2 Barrier~1)}
+The result above uses a deterministic travel-time oracle to establish the
+dispatch-side speedup ceiling. The dispatcher abstracts travel times behind
+a \texttt{TravelTimeOracle} interface, so the GNN-based stochastic
+flow models proposed under Barrier~1 plug in as a drop-in replacement.
+Two consequences follow. First, when uncertainty is introduced, the
+LLP feasibility head must be re-trained on a stochastic-oracle dataset to
+remain calibrated; the data-collection observer (which logs
+$\sim$390k labeled candidates per sweep) is the same. Second, the
+HLP signal that was insufficient in the deterministic regime grows
+under stochasticity: rebalancing under uncertain travel times is
+fundamentally a risk-management decision (allocate slack to regions whose
+demand has high variance), which the heuristic does not do. We therefore
+expect Barrier~1's GNN traffic model and Barrier~2's RL-based HLP to be
+\emph{co-developed}: the stochastic oracle creates the headroom that
+makes a learned HLP valuable.
+
+\section{Position in the Multi-Modal Picture}
+Within the broader Thrust~1 + Thrust~2 architecture, this work
+operates the \textbf{microtransit leg} of the multi-modal mix: outskirt
+$\to$ hub trips on capacitated on-demand vehicles. The same HLP/LLP
+abstraction extends naturally to multi-modal dispatch by widening the
+action space at both levels: the HLP allocates capacity across modes
+(microtransit, fixed-route, vanpool, volunteer) given mode-specific cost
+and reliability, while the LLP performs per-mode routing or transfer
+scheduling. The decomposition argument we have validated in the
+single-mode setting (per-decision tractability without quality loss)
+is the precondition for that extension; multi-modal scheduling is
+otherwise combinatorially intractable in real time.
+
+\section{Digital-Twin Evaluation Plan (Thrust~2 Barrier~3)}
+The digital twin (Co-PI Talusan, M2 milestone) is the validation
+environment for these dispatchers under realistic operating conditions.
+Concretely, we propose three evaluation phases against MATA / Feeonix /
+Ford operational data:
+\textbf{(P1) Calibration.} Replay one week of Feeonix microtransit traces
+through the digital twin; tune the demand oracle and the OSM travel-time
+distribution until the heuristic dispatcher reproduces observed assignment
+rates and waiting times within $\pm$5\%.
+\textbf{(P2) Stress testing.} Sweep fleet$\times$intensity$\times$incident
+scenarios (traffic disruption, volunteer no-show, shift surge) and report
+the speedup--quality Pareto frontier across HLP/LLP combinations. Success
+metrics align with the proposal's \textit{Metrics of Success}: on-time
+arrival reliability ($\geq$95\% on the heaviest cell), p95 per-decision
+wall-time ($<$50\,ms at fleet=$10^3$), and passenger waiting time tails.
+\textbf{(P3) Counterfactual evaluation.} For each historical incident,
+compare the learned-LLP filter dispatcher's response against the recorded
+operator response, quantifying both objective improvement and the
+override rate by partner dispatchers (a proxy for Thrust~3 alignment).
+
+\section{Status and Roadmap}
+\textbf{Delivered:} HLP/LLP scaffold; OSM Memphis substrate; heuristic
+HLP+LLP and learned-LLP plug-in (filter / stacked); 3-seed
+$\times$ 9-cell sweeps; Hydra-driven master sweep over the four planner
+combinations; HLP rebalance-decision data collector. \textbf{Next
+(supporting Thrust~2 Year-1 milestones):} (a) wire the GNN stochastic
+travel-time oracle (Barrier~1) into the dispatcher; (b) port a
+multi-modal action space to the LLP insertion kernel; (c) reactivate
+the learned-HLP path under stochastic travel and report the M2 digital-twin
+calibration delta. The infrastructure built here directly supports the M2
+(digital-twin validation) and M4 (operations prototype) milestones.
+
+\end{document}

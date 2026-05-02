@@ -19,6 +19,9 @@ from hcoord.travel import TravelTimeOracle  # noqa: E402
 
 def _toy_scorer() -> tuple[LearnedScorer, dict]:
     """Build a fresh untrained scorer + standardizer for plumbing tests."""
+    # Pin RNG: untrained weights can otherwise put log1p_cost in a regime
+    # where expm1 overflows to inf, making score_pair return inf.
+    torch.manual_seed(0)
     cfg = ScorerConfig(n_features=len(CONTINUOUS_FEATURES), hidden_dim=16,
                        n_hidden_layers=2)
     model = InsertionScorer(cfg)

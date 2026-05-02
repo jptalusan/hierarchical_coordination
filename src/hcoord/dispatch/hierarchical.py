@@ -15,7 +15,7 @@ A real forecaster can be plugged in by replacing `_compute_targets`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from hcoord.demand import Request
 from hcoord.dispatch.base import DispatchResult, Dispatcher
@@ -26,6 +26,9 @@ from hcoord.travel import TravelTimeOracle
 
 if TYPE_CHECKING:
     from hcoord.learning.inference import LearnedScorer
+
+# (state_dict, targets_dict, now) -> None. See `HLPCollector`.
+HLPObserver = Callable[[dict, dict[int, int], float], None]
 
 
 class HierarchicalDispatcher(Dispatcher):
@@ -43,6 +46,7 @@ class HierarchicalDispatcher(Dispatcher):
         scorer_mode: str = "rank",
         scorer_top_k: int = 3,
         scorer_filter_logit_threshold: float = -2.0,
+        hlp_observer: HLPObserver | None = None,
     ) -> None:
         super().__init__(
             fleet=fleet, oracle=oracle, observer=observer,
@@ -57,6 +61,7 @@ class HierarchicalDispatcher(Dispatcher):
             v.id: partition.region(v.location) for v in fleet
         }
         self._last_rebalance: float = -float("inf")
+        self.hlp_observer = hlp_observer
 
     def region_of_vehicle(self, vehicle_id: int) -> int:
         return self._region_of[vehicle_id]
@@ -85,6 +90,26 @@ class HierarchicalDispatcher(Dispatcher):
         self._last_rebalance = now
 
         targets = self._compute_targets(now)
+
+        if self.hlp_observer is not None:
+            # Lazy import: hlp_features pulls only stdlib + hcoord, but the
+            # collector requires pandas at write time. Importing here keeps
+            # the no-collection hot path identical to before this change.
+            from hcoord.learning.hlp_features import extract_hlp_state
+
+            demand_counts = self._region_demand_counts(now)
+            state = extract_hlp_state(
+                fleet=self.fleet,
+                region_of=self._region_of,
+                partition=self.partition,
+                oracle=self.oracle,
+                demand_counts=demand_counts,
+                now=now,
+                rebalance_interval_min=self.rebalance_interval,
+                forecast_lookahead_min=self.forecast_lookahead,
+            )
+            self.hlp_observer(state, dict(targets), now)
+
         current: dict[int, int] = dict.fromkeys(range(self.partition.n_regions), 0)
         for v in self.fleet:
             current[self._region_of[v.id]] += 1
@@ -131,7 +156,10 @@ class HierarchicalDispatcher(Dispatcher):
             return vehicle, src, dst, new_hub, travel
         return None
 
-    def _compute_targets(self, now: float) -> dict[int, int]:
+    def _region_demand_counts(self, now: float) -> dict[int, int]:
+        """Per-region request count in the lookahead window. Pure forecast
+        readout (perfect-info oracle); used by both `_compute_targets` and
+        the optional HLP observer."""
         end = now + self.forecast_lookahead
         counts: dict[int, int] = dict.fromkeys(range(self.partition.n_regions), 0)
         for req in self._future:
@@ -140,7 +168,10 @@ class HierarchicalDispatcher(Dispatcher):
             if req.announce_time >= end:
                 break
             counts[self.partition.region(req.origin)] += 1
+        return counts
 
+    def _compute_targets(self, now: float) -> dict[int, int]:
+        counts = self._region_demand_counts(now)
         fleet_size = len(self.fleet)
         n_regions = self.partition.n_regions
         total = sum(counts.values())
